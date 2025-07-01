@@ -2,13 +2,15 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from technical_indicators import TechnicalIndicators
+from typing import List
 
 class StockDataFetcher:
     """Fetch and preprocess stock data"""
 
-    def __init__(self, stock_list=None, period="2y", interval="1d"):
-        self.stock_list = stock_list
-        self.period = period
+    def __init__(self, stock_list: List[str] | None = None, start_date: str | None = None, end_date: str | None = None, interval="1d"):
+        self.stock_list = stock_list if stock_list is not None else []
+        self.start_date = start_date
+        self.end_date = end_date
         self.interval = interval
         self.stock_data = {}
         self.returns_matrix = None
@@ -18,11 +20,15 @@ class StockDataFetcher:
         """Fetch data for all stocks with improved market cap handling"""
         print(f"Fetching data for {len(self.stock_list)} stocks...")
 
+        if not self.stock_list:
+            print("No stocks provided to fetch data for. Skipping fetching.")
+            return {}
+
         for i, ticker in enumerate(self.stock_list):
             try:
                 print(f"Fetching {ticker} ({i+1}/{len(self.stock_list)})")
                 stock = yf.Ticker(ticker)
-                df = stock.history(period=self.period, interval=self.interval)
+                df = stock.history(start=self.start_date, end=self.end_date, interval=self.interval)
 
                 if not df.empty and len(df) > 100:
                     df = df.dropna()
@@ -118,7 +124,7 @@ class StockDataFetcher:
     def create_returns_matrix(self):
         """Create returns matrix for all stocks"""
         returns_data = {}
-        common_dates = None
+        common_dates = set()
 
         for ticker, df in self.stock_data.items():
             if common_dates is None:
@@ -137,7 +143,7 @@ class StockDataFetcher:
                 else:
                     returns_data[ticker].append(0)
 
-        self.returns_matrix = pd.DataFrame(returns_data, index=common_dates)
+        self.returns_matrix = pd.DataFrame(returns_data, index=pd.Index(common_dates))
         return self.returns_matrix
 
     def debug_market_caps(self):

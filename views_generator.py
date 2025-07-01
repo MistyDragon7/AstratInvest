@@ -111,25 +111,29 @@ class CNNBiLSTMViewsGenerator:
 
         return model
 
-    def train_all_models(self, stock_data, epochs=50, batch_size=32, model_dir="saved_models"):
+    def train_all_models(self, stock_data, epochs=50, batch_size=32, model_dir="saved_models", training_end_date: pd.Timestamp = None):
         print(f"Training models for {len(stock_data)} stocks...")
         os.makedirs(model_dir, exist_ok=True)
+
+        training_suffix = "" # Default empty suffix
+        if training_end_date is not None:
+            training_suffix = f"_{training_end_date.strftime('%Y%m%d')}"
 
         for ticker in stock_data.keys():
             print(f"\nProcessing model for {ticker}")
 
-            model_path = os.path.join(model_dir, f"{ticker}.h5")
-            scaler_path = os.path.join(model_dir, f"{ticker}_scaler.pkl")
+            model_path = os.path.join(model_dir, f"{ticker}{training_suffix}.h5")
+            scaler_path = os.path.join(model_dir, f"{ticker}{training_suffix}_scaler.pkl")
 
-            # Removed logic for loading existing models to force retraining for rolling window
-            # if os.path.exists(model_path) and os.path.exists(scaler_path):
-            #     try:
-            #         self.models[ticker] = load_model(model_path)
-            #         self.scalers[ticker] = joblib.load(scaler_path)
-            #         print(f"✓ Loaded saved model and scaler for {ticker}")
-            #         continue
-            #     except Exception as e:
-            #         print(f"⚠️ Failed to load saved model for {ticker}: {e}. Retraining...")
+            # Restore logic for loading existing models for this specific period
+            if os.path.exists(model_path) and os.path.exists(scaler_path):
+                try:
+                    self.models[ticker] = tf.keras.models.load_model(model_path, custom_objects={'mc_dropout': mc_dropout})
+                    self.scalers[ticker] = joblib.load(scaler_path)
+                    print(f"✓ Loaded saved model and scaler for {ticker} (period: {training_end_date.date() if training_end_date else 'N/A'})")
+                    continue
+                except Exception as e:
+                    print(f"⚠️ Failed to load saved model for {ticker} (period: {training_end_date.date() if training_end_date else 'N/A'}): {e}. Retraining...")
 
             # Train from scratch
             X, y = self.prepare_data_for_stock(stock_data, ticker)
