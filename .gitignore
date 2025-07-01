@@ -1,2 +1,8 @@
+saved_models/
 .venv/
+__pycache__/
 pyrightconfig.json
+results/
+backtest_summary.csv
+performance_comparison.png
+precomputed_weights.parquet
