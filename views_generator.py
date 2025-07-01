@@ -1,11 +1,10 @@
 import pandas as pd
 import os
-from tensorflow.keras.models import load_model
+# from tensorflow.keras.models import load_model # Will use tf.keras.models.load_model
 import joblib
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import mixed_precision
-mixed_precision.set_global_policy('mixed_float16')
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (Input, Conv1D, MaxPooling1D,
                                    Bidirectional, LSTM, Dense, Dropout,
@@ -13,10 +12,12 @@ from tensorflow.keras.layers import (Input, Conv1D, MaxPooling1D,
                                    GaussianNoise)
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.losses import MeanSquaredError
+from tensorflow.keras.metrics import MeanAbsoluteError
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-from tensorflow.keras import mixed_precision
+# from tensorflow.keras import mixed_precision # Redundant after first import
 
 SEED = 42
 os.environ['PYTHONHASHSEED'] = str(SEED)
@@ -98,8 +99,8 @@ class CNNBiLSTMViewsGenerator:
         output = Dense(1, activation='linear')(x)
 
         model = Model(inputs=inputs, outputs=output)
-        from tensorflow.keras.losses import MeanSquaredError
-        from tensorflow.keras.metrics import MeanAbsoluteError
+        # from tensorflow.keras.losses import MeanSquaredError
+        # from tensorflow.keras.metrics import MeanAbsoluteError
 
         model.compile(
             optimizer=Adam(learning_rate=0.001),
@@ -120,21 +121,21 @@ class CNNBiLSTMViewsGenerator:
             model_path = os.path.join(model_dir, f"{ticker}.h5")
             scaler_path = os.path.join(model_dir, f"{ticker}_scaler.pkl")
 
-            # Try loading model
-            if os.path.exists(model_path) and os.path.exists(scaler_path):
-                try:
-                    self.models[ticker] = load_model(model_path)
-                    self.scalers[ticker] = joblib.load(scaler_path)
-                    print(f"✓ Loaded saved model and scaler for {ticker}")
-                    continue
-                except Exception as e:
-                    print(f"⚠️ Failed to load saved model for {ticker}: {e}. Retraining...")
+            # Removed logic for loading existing models to force retraining for rolling window
+            # if os.path.exists(model_path) and os.path.exists(scaler_path):
+            #     try:
+            #         self.models[ticker] = load_model(model_path)
+            #         self.scalers[ticker] = joblib.load(scaler_path)
+            #         print(f"✓ Loaded saved model and scaler for {ticker}")
+            #         continue
+            #     except Exception as e:
+            #         print(f"⚠️ Failed to load saved model for {ticker}: {e}. Retraining...")
 
             # Train from scratch
             X, y = self.prepare_data_for_stock(stock_data, ticker)
 
             if len(X) < 100:
-                print(f"⚠️ Insufficient data for {ticker} — Skipping")
+                print(f"Insufficient data for {ticker} — Skipping")
                 continue
 
             # Scale features
@@ -167,7 +168,7 @@ class CNNBiLSTMViewsGenerator:
             self.models[ticker] = model
 
             # Save model and scaler
-            model.save(model_path)
+            tf.keras.models.save_model(model, model_path)
             joblib.dump(scaler, scaler_path)
 
             if history.history:
@@ -182,7 +183,8 @@ class CNNBiLSTMViewsGenerator:
 
         def predict_mc(model, x_input, n_samples=10):
             x_repeated = tf.repeat(x_input, repeats=n_samples, axis=0)
-            preds = model(x_repeated, training=True)  # Dropout off
+            # Ensure dropout is active during inference for MC Dropout
+            preds = model(x_repeated, training=True) 
             return tf.squeeze(preds, axis=-1).numpy()
         views = {}
         view_uncertainties = {}
@@ -205,7 +207,7 @@ class CNNBiLSTMViewsGenerator:
 
             mc_preds = predict_mc(self.models[ticker], X_latest_scaled, n_samples=50)
             expected_return = np.mean(mc_preds)
-            view_uncertainty = max(np.std(mc_preds), 0.001)
+            view_uncertainty = max(float(np.std(mc_preds)), 0.001) # Explicitly cast to float
             views[ticker] = expected_return
             view_uncertainties[ticker] = view_uncertainty
 

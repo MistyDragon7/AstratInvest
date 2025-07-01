@@ -69,15 +69,12 @@ class StockDataFetcher:
             history = stock.history(period="5d")
             if not history.empty:
                 avg_price = history['Close'].mean()
-                # Rough estimate: assume 1 billion shares for unknown stocks
                 estimated_market_cap = avg_price * 1e9
-                print(f"  📊 {ticker}: Estimated market cap based on price")
+                print(f"{ticker}: Estimated market cap based on price")
                 return estimated_market_cap
             
-            if ticker.endswith('.NS'):  # NSE stocks
-                default_cap = 5e10  # 50 billion INR default for Indian stocks
-            else:
-                default_cap = 1e12  # 1 trillion default for other stocks
+            
+            default_cap = 5e10  # 50 billion INR default for Indian stocks
             
             print(f"  ⚠️ {ticker}: Using default market cap ({default_cap:,.0f})")
             return default_cap
