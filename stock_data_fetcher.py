@@ -144,6 +144,9 @@ class StockDataFetcher:
                     returns_data[ticker].append(0)
 
         self.returns_matrix = pd.DataFrame(returns_data, index=pd.Index(common_dates))
+        print(f"Debug: Number of common dates: {len(common_dates)}")
+        if not common_dates:
+            print("Debug: No common dates found across all stocks in the specified period.")
         return self.returns_matrix
 
     def debug_market_caps(self):

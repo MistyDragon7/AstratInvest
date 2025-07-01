@@ -26,6 +26,7 @@ tf.random.set_seed(SEED)
 tf.keras.utils.set_random_seed(SEED)
 tf.config.experimental.enable_op_determinism()  # Ensure full determinism
 mixed_precision.set_global_policy('mixed_float16')
+tf.config.optimizer.set_jit(True) # Enable XLA for potential speedup
 @tf.function(reduce_retracing=True)
 def predict_mc_tf(model, x_repeated):
     return tf.squeeze(model(x_repeated, training=True), axis=-1)
