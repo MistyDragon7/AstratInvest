@@ -98,28 +98,28 @@ def precompute_weights(symbols: List[str], weights_path: str = WEIGHTS_PATH_DEFA
     if full_returns_matrix.empty:
         raise RuntimeError("No returns matrix — aborting pre‑compute stage.")
 
-    full_returns_matrix.index = pd.to_datetime(full_returns_matrix.index).normalize()
+    full_returns_matrix.index = pd.to_datetime(full_returns_matrix.index)
 
-    initial_train_start = pd.to_datetime(GLOBAL_START_DATE).normalize()
+    initial_train_start = pd.to_datetime(GLOBAL_START_DATE)
     initial_train_end = initial_train_start + pd.Timedelta(days=TRAINING_WINDOW_DAYS + 30)
 
     if initial_train_end > full_returns_matrix.index[-1]:
         initial_train_end = full_returns_matrix.index[-1]
 
-    initial_train_end_loc = full_returns_matrix.index.get_loc(initial_train_end, method='nearest')
+    initial_train_end_loc = full_returns_matrix.index.get_indexer([initial_train_end], method='nearest')[0]
     initial_train_end = full_returns_matrix.index[initial_train_end_loc]
 
     current_rebalance_date = initial_train_end
 
     rebalance_dates: List[pd.Timestamp] = []
 
-    global_end_date_ts = pd.to_datetime(GLOBAL_END_DATE).normalize()
+    global_end_date_ts = pd.to_datetime(GLOBAL_END_DATE)
     while current_rebalance_date <= global_end_date_ts:
-        rebalance_dates.append(current_rebalance_date)
+        rebalance_dates.append(pd.Timestamp(current_rebalance_date))
         current_rebalance_date += pd.Timedelta(days=RETRAIN_FREQ_DAYS)
         if current_rebalance_date > global_end_date_ts:
             if not rebalance_dates or (global_end_date_ts > rebalance_dates[-1] and global_end_date_ts not in rebalance_dates):
-                rebalance_dates.append(global_end_date_ts)
+                rebalance_dates.append(pd.Timestamp(global_end_date_ts))
             break
 
     print(f"📅 Rebalance dates: {len(rebalance_dates)} (every {RETRAIN_FREQ_DAYS} trading days, approx. quarterly)")
@@ -144,7 +144,7 @@ def precompute_weights(symbols: List[str], weights_path: str = WEIGHTS_PATH_DEFA
 
         views, view_uncertainties = vg.generate_investor_views(data_for_period, PRED_HORIZON)
 
-        start_date_str = full_returns_matrix.index[0].strftime('%Y-%m-%d') # Direct strftime
+        start_date_str = pd.Timestamp(full_returns_matrix.index[0]).strftime('%Y-%m-%d') # Direct strftime
         reb_date_str = reb_date.strftime('%Y-%m-%d')
         tmp_fetcher = StockDataFetcher(list(data_for_period.keys()), start_date=start_date_str, end_date=reb_date_str)
         tmp_fetcher.stock_data = data_for_period
@@ -231,7 +231,7 @@ class BLWeightPlaybackStrategy(bt.Strategy):
 
 def run_backtest(weights_path=WEIGHTS_PATH_DEFAULT, benchmark_symbol=BENCHMARK_SYM):
     weights_df = pd.read_parquet(weights_path)
-    weights_df.index = pd.to_datetime(weights_df.index).normalize()
+    weights_df.index = pd.to_datetime(weights_df.index)
     
     symbols = list(weights_df.columns)
     all_syms = symbols + ([benchmark_symbol] if benchmark_symbol not in symbols else [])
@@ -253,7 +253,7 @@ def run_backtest(weights_path=WEIGHTS_PATH_DEFAULT, benchmark_symbol=BENCHMARK_S
             print(f"Warning: Dataframe for {sym} is empty after processing. Skipping.")
             continue
         
-        feed = bt.feeds.PandasData(dataname=df)
+        feed = bt.feeds.PandasData(df)
         cerebro.adddata(feed, name=sym)
 
     cerebro.addstrategy(BLWeightPlaybackStrategy, weights_df=weights_df)

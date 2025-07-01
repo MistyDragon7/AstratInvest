@@ -31,6 +31,11 @@ class StockDataFetcher:
                 df = stock.history(start=self.start_date, end=self.end_date, interval=self.interval)
 
                 if not df.empty and len(df) > 100:
+                    df.index = pd.to_datetime(df.index)
+                    if df.index.tz is not None:
+                        df.index = df.index.tz_convert(None).normalize()
+                    else:
+                        df.index = df.index.normalize()
                     df = df.dropna()
                     self.stock_data[ticker] = df
 
@@ -124,13 +129,16 @@ class StockDataFetcher:
     def create_returns_matrix(self):
         """Create returns matrix for all stocks"""
         returns_data = {}
-        common_dates = set()
+        common_dates = None # Initialize to None
 
         for ticker, df in self.stock_data.items():
             if common_dates is None:
                 common_dates = set(df.index)
             else:
                 common_dates = common_dates.intersection(set(df.index))
+        
+        if common_dates is None:
+            common_dates = [] # Ensure it's an empty list if no data was processed
 
         common_dates = sorted(list(common_dates))
 
