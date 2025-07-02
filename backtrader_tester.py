@@ -64,16 +64,16 @@ DEFAULT_SYMBOLS: List[str] = [
 ]
 # GLOBAL_START_DATE = "2019-01-01" # Keep 5 years for full data fetch
 # GLOBAL_END_DATE = "2024-04-30"   # Keep 5 years for full data fetch
-GLOBAL_START_DATE = "2020-06-01"
-GLOBAL_END_DATE = "2023-02-28" # February 2023 as requested
+GLOBAL_START_DATE = "2020-01-01"
+GLOBAL_END_DATE = "2025-02-28" # February 2023 as requested
 
 INTERVAL = "1d"
 # TRAIN_TEST_SPLIT = 0.60  # No longer used for fixed split
 REB_FREQ = 10            # trading‑day rebalance cadence
 INITIAL_CASH = 1_000_000
 SEQ_LEN = 30
-EPOCHS = 50
-BATCH_SIZE = 32
+EPOCHS = 20
+BATCH_SIZE = 64
 PRED_HORIZON = 5
 WEIGHTS_PATH_DEFAULT = "precomputed_weights.parquet"
 MODEL_DIR = "saved_models"
@@ -98,78 +98,147 @@ def precompute_weights(symbols: List[str], weights_path: str = WEIGHTS_PATH_DEFA
     if full_returns_matrix.empty:
         raise RuntimeError("No returns matrix — aborting pre‑compute stage.")
 
-    full_returns_matrix.index = pd.to_datetime(full_returns_matrix.index)
+    # Get all trading dates within the global range from the returns matrix index
+    # These dates are already timezone-naive and normalized from StockDataFetcher
+    all_trading_dates = full_returns_matrix.index.tolist()
+    
+    # Determine the first possible rebalance date after the initial training window.
+    # This is the point from which we start generating 10-day rebalance points.
+    # It should be roughly 1 year (TRAINING_WINDOW_DAYS) after GLOBAL_START_DATE.
+    global_start_date_ts = pd.to_datetime(GLOBAL_START_DATE)
 
-    initial_train_start = pd.to_datetime(GLOBAL_START_DATE)
-    initial_train_end = initial_train_start + pd.Timedelta(days=TRAINING_WINDOW_DAYS + 30)
+    # Find the index of GLOBAL_START_DATE in all_trading_dates
+    # Handle cases where GLOBAL_START_DATE might not be an exact trading day
+    global_start_idx = 0
+    if global_start_date_ts in all_trading_dates:
+        global_start_idx = all_trading_dates.index(global_start_date_ts)
+    else:
+        # Find the first trading date on or after GLOBAL_START_DATE
+        for idx, date in enumerate(all_trading_dates):
+            if date >= global_start_date_ts:
+                global_start_idx = idx
+                break
 
-    if initial_train_end > full_returns_matrix.index[-1]:
-        initial_train_end = full_returns_matrix.index[-1]
+    # The first rebalance date (for which weights are computed) should be at least
+    # TRAINING_WINDOW_DAYS trading days after the start of the *overall* data.
+    first_rebalance_data_eligible_idx = global_start_idx + TRAINING_WINDOW_DAYS
 
-    initial_train_end_loc = full_returns_matrix.index.get_indexer([initial_train_end], method='nearest')[0]
-    initial_train_end = full_returns_matrix.index[initial_train_end_loc]
+    if first_rebalance_data_eligible_idx >= len(all_trading_dates):
+        raise RuntimeError("Not enough data for initial training window for any rebalance point.")
 
-    current_rebalance_date = initial_train_end
-
-    rebalance_dates: List[pd.Timestamp] = []
-
-    global_end_date_ts = pd.to_datetime(GLOBAL_END_DATE)
-    while current_rebalance_date <= global_end_date_ts:
-        rebalance_dates.append(pd.Timestamp(current_rebalance_date))
-        current_rebalance_date += pd.Timedelta(days=RETRAIN_FREQ_DAYS)
-        if current_rebalance_date > global_end_date_ts:
-            if not rebalance_dates or (global_end_date_ts > rebalance_dates[-1] and global_end_date_ts not in rebalance_dates):
-                rebalance_dates.append(pd.Timestamp(global_end_date_ts))
+    # Find the first actual 10-day rebalance point. It should be at or after
+    # first_rebalance_data_eligible_idx and align with REB_FREQ.
+    start_idx_for_10_day_rebalance_points = None
+    for i in range(first_rebalance_data_eligible_idx, len(all_trading_dates)):
+        # Calculate how many REB_FREQ intervals from global_start_idx
+        if (i - global_start_idx) % REB_FREQ == 0:
+            start_idx_for_10_day_rebalance_points = i
             break
+    
+    if start_idx_for_10_day_rebalance_points is None:
+        # Fallback if no exact REB_FREQ alignment found after eligible date, just use the eligible date
+        start_idx_for_10_day_rebalance_points = first_rebalance_data_eligible_idx
+        print(f"⚠️ Could not find perfect 10-day alignment after initial training. Starting rebalance points from {all_trading_dates[start_idx_for_10_day_rebalance_points].date()}")
 
-    print(f"📅 Rebalance dates: {len(rebalance_dates)} (every {RETRAIN_FREQ_DAYS} trading days, approx. quarterly)")
-    if not rebalance_dates:
-        raise RuntimeError("No rebalance dates generated — aborting pre‑compute stage.")
+
+    # Generate 10-day rebalance dates from these trading dates
+    rebalance_points_10_day: List[pd.Timestamp] = []
+    for i in range(start_idx_for_10_day_rebalance_points, len(all_trading_dates), REB_FREQ):
+        rebalance_points_10_day.append(all_trading_dates[i])
+
+    # Ensure the very last date in the overall period is included as a rebalance point if not already
+    if all_trading_dates and rebalance_points_10_day and all_trading_dates[-1] not in rebalance_points_10_day:
+        rebalance_points_10_day.append(all_trading_dates[-1])
+    
+    # Sort and ensure uniqueness just in case (though should be ordered by construction)
+    rebalance_points_10_day = sorted(list(set(rebalance_points_10_day)))
+
+    print(f"📅 Total 10-day Rebalance Points: {len(rebalance_points_10_day)}")
+    if not rebalance_points_10_day:
+        raise RuntimeError("No 10-day rebalance points generated after initial training window — cannot proceed.")
+
 
     weight_rows = []
+    
+    # Initialize variables for managing quarterly retraining
+    last_retrain_date = None
+    current_views = None
+    current_view_uncertainties = None
 
-    for reb_date in rebalance_dates:
-        print(f"Processing rebalance date: {reb_date.date()}")
-        data_for_period = {
-            t: df.loc[full_returns_matrix.index[0]:reb_date].copy()
-            for t, df in fetcher.stock_data.items()
-            if len(df.loc[full_returns_matrix.index[0]:reb_date]) > SEQ_LEN + PRED_HORIZON + 2
-        }
-        if len(data_for_period) < 2:
-            print(f"⚠️ {reb_date.date()}: <2 assets with sufficient history for training/views — skipping")
+    for i, current_rebalance_date in enumerate(rebalance_points_10_day):
+        print(f"Processing rebalance date: {current_rebalance_date.date()}")
+
+        # Determine if it's time to retrain the models (quarterly logic)
+        is_first_rebalance = (last_retrain_date is None) # Retrain on first actual rebalance point
+        should_retrain = False
+
+        if is_first_rebalance:
+            should_retrain = True
+        elif last_retrain_date:
+            # Find the number of trading days between last_retrain_date and current_rebalance_date
+            # Get subset of `all_trading_dates` between these two dates
+            trading_days_since_last_retrain = len([d for d in all_trading_dates if last_retrain_date < d <= current_rebalance_date])
+            if trading_days_since_last_retrain >= RETRAIN_FREQ_DAYS:
+                should_retrain = True
+
+        if should_retrain:
+            print(f"🔄 Retraining models at: {current_rebalance_date.date()}")
+            
+            # For training, data is from TRAINING_WINDOW_DAYS prior to current_rebalance_date
+            current_reb_idx_in_all = all_trading_dates.index(current_rebalance_date)
+            training_start_idx = max(0, current_reb_idx_in_all - TRAINING_WINDOW_DAYS)
+            training_start_date = all_trading_dates[training_start_idx]
+
+            # Ensure training_start_date is not before the global start date
+            if training_start_date < global_start_date_ts:
+                training_start_date = global_start_date_ts
+
+            data_for_training = {
+                t: df.loc[training_start_date:current_rebalance_date].copy()
+                for t, df in fetcher.stock_data.items()
+                if len(df.loc[training_start_date:current_rebalance_date]) > SEQ_LEN + PRED_HORIZON + 2
+            }
+
+            if len(data_for_training) < 2:
+                print(f"⚠️ {current_rebalance_date.date()}: <2 assets with sufficient history for training/views — skipping retraining")
+                if current_views is None:
+                    print("🚫 No views available. Cannot compute weights. This should not happen if initial checks are sufficient.")
+                    continue 
+                else:
+                    print("✅ Using previously trained models/views (no retraining this quarter, insufficient new data).")
+            else:
+                vg = CNNBiLSTMViewsGenerator(len(data_for_training), sequence_length=SEQ_LEN)
+                vg.train_all_models(data_for_training, epochs=EPOCHS, batch_size=BATCH_SIZE, model_dir=MODEL_DIR, training_end_date=current_rebalance_date)
+                current_views, current_view_uncertainties = vg.generate_investor_views(data_for_training, PRED_HORIZON)
+                last_retrain_date = current_rebalance_date 
+
+        if current_views is None:
+            print(f"🚫 {current_rebalance_date.date()}: No views available to compute weights — skipping.")
             continue
-        
-        vg = CNNBiLSTMViewsGenerator(len(data_for_period), sequence_length=SEQ_LEN)
-        vg.train_all_models(data_for_period, epochs=EPOCHS, batch_size=BATCH_SIZE, model_dir=MODEL_DIR, training_end_date=reb_date)
 
-        views, view_uncertainties = vg.generate_investor_views(data_for_period, PRED_HORIZON)
+        # For BL optimization, use data up to current_rebalance_date
+        # Ensure we are using only available assets for the current training period
+        available_assets_for_blo = [k for k in data_for_training.keys() if k in full_returns_matrix.columns]
+        returns_matrix_for_blo = full_returns_matrix.loc[global_start_date_ts:current_rebalance_date][available_assets_for_blo]
+        returns_matrix_for_blo = returns_matrix_for_blo.dropna()
 
-        start_date_str = pd.Timestamp(full_returns_matrix.index[0]).strftime('%Y-%m-%d') # Direct strftime
-        reb_date_str = reb_date.strftime('%Y-%m-%d')
-        tmp_fetcher = StockDataFetcher(list(data_for_period.keys()), start_date=start_date_str, end_date=reb_date_str)
-        tmp_fetcher.stock_data = data_for_period
-        returns_matrix = tmp_fetcher.create_returns_matrix()
-        
-        market_caps_slice = {k: v for k, v in fetcher.market_caps.items() if k in data_for_period and v > 0}
+        market_caps_slice = {k: v for k, v in fetcher.market_caps.items() if k in available_assets_for_blo and v > 0}
 
-        if returns_matrix.empty or not market_caps_slice:
-            print(f"⚠️ {reb_date.date()}: Empty returns matrix or no valid market caps for BL optimization — skipping")
+        if returns_matrix_for_blo.empty or not market_caps_slice:
+            print(f"⚠️ {current_rebalance_date.date()}: Empty returns matrix or no valid market caps for BL optimization — skipping")
             continue
 
-        blo = BlackLittermanOptimizer(returns_matrix, market_caps_slice, risk_free_rate=0.06)
-        weights, *_ = blo.black_litterman_optimization(views, view_uncertainties)
+        blo = BlackLittermanOptimizer(returns_matrix_for_blo, market_caps_slice, risk_free_rate=0.06)
+        weights, *_ = blo.black_litterman_optimization(current_views, current_view_uncertainties)
 
         w = weights / weights.sum()
-        row = {"Date": reb_date}
+        row = {"Date": current_rebalance_date}
         row.update(w.to_dict())
         weight_rows.append(row)
-        print(f"✓ {reb_date.date()}: weights ready (top: {w.nlargest(3).to_dict()})")
+        print(f"✓ {current_rebalance_date.date()}: weights ready (top: {w.nlargest(3).to_dict()})")
 
     if not weight_rows:
         raise RuntimeError("No weights were computed — cannot proceed.")
-    
-    for row in weight_rows:
-        pass 
     
     weights_df = pd.DataFrame(weight_rows).set_index("Date").sort_index()
     weights_df.to_parquet(weights_path)
@@ -196,14 +265,16 @@ class BLWeightPlaybackStrategy(bt.Strategy):
 
     def __init__(self):
         self.weights_df = self.p.weights_df.copy()
-        self.weights_df.index = pd.to_datetime(self.weights_df.index).normalize()
+        # Normalize here to ensure consistency with current_dt in next()
+        self.weights_df.index = pd.to_datetime(self.weights_df.index).normalize() 
         self.last_rebalanced = None
         self.portfolio_values = []
         self.dates = []
 
     def next(self):
         current_dt_py = self.datas[0].datetime.datetime(0)
-        current_dt = pd.to_datetime(current_dt_py).normalize()
+        # Normalize here to ensure consistency with weights_df.index
+        current_dt = pd.to_datetime(current_dt_py).normalize() 
         
         self.portfolio_values.append(self.broker.getvalue())
         self.dates.append(current_dt)
@@ -231,29 +302,31 @@ class BLWeightPlaybackStrategy(bt.Strategy):
 
 def run_backtest(weights_path=WEIGHTS_PATH_DEFAULT, benchmark_symbol=BENCHMARK_SYM):
     weights_df = pd.read_parquet(weights_path)
-    weights_df.index = pd.to_datetime(weights_df.index)
+    # Ensure weights_df index is normalized for comparison
+    weights_df.index = pd.to_datetime(weights_df.index).normalize()
     
     symbols = list(weights_df.columns)
     all_syms = symbols + ([benchmark_symbol] if benchmark_symbol not in symbols else [])
 
     fetcher = StockDataFetcher(all_syms, start_date=GLOBAL_START_DATE, end_date=GLOBAL_END_DATE, interval=INTERVAL)
     fetcher.fetch_all_stocks()
-
+    fetcher.add_technical_indicators()
     cerebro = bt.Cerebro()
     cerebro.broker.setcash(INITIAL_CASH)
-
+    cerebro.broker.setcommission(commission=0.001)
     for sym in symbols:
         if sym not in fetcher.stock_data:
             print(f"Warning: Data for {sym} not available from fetcher. Skipping.")
             continue
         df = fetcher.stock_data[sym].copy()
-        df.index = pd.to_datetime(df.index).normalize()
+        # Normalize df index before feeding to Backtrader
+        df.index = pd.to_datetime(df.index).normalize() 
         
         if df.empty:
             print(f"Warning: Dataframe for {sym} is empty after processing. Skipping.")
             continue
         
-        feed = bt.feeds.PandasData(df)
+        feed = bt.feeds.PandasData(dataname=df)
         cerebro.adddata(feed, name=sym)
 
     cerebro.addstrategy(BLWeightPlaybackStrategy, weights_df=weights_df)
@@ -261,11 +334,34 @@ def run_backtest(weights_path=WEIGHTS_PATH_DEFAULT, benchmark_symbol=BENCHMARK_S
     strat = res[0]
 
     nifty_df = fetcher.stock_data[benchmark_symbol].copy()
+    # Normalize nifty_df index for consistent date handling
     nifty_df.index = pd.to_datetime(nifty_df.index).normalize()
 
-    nifty_series = nifty_df["Close"].reindex(pd.to_datetime(strat.dates).normalize(), method="pad")
-    nifty_series = nifty_series / nifty_series.iloc[0] * INITIAL_CASH
-    portfolio_series = pd.Series(strat.portfolio_values, index=pd.to_datetime(strat.dates).normalize())
+    # The fix: Use the first date from weights_df as the test_start for NIFTY comparison
+    test_start = weights_df.index[0]
+
+    # Manually filter strat.dates and strat.portfolio_values for the backtest period
+    actual_portfolio_dates = []
+    actual_portfolio_values = []
+    for i, date_val in enumerate(strat.dates):
+        current_date_normalized = pd.to_datetime(date_val).normalize()
+        if current_date_normalized >= test_start:
+            actual_portfolio_dates.append(current_date_normalized)
+            actual_portfolio_values.append(strat.portfolio_values[i])
+    
+    portfolio_series = pd.Series(actual_portfolio_values, index=actual_portfolio_dates)
+
+    # Now for NIFTY series, ensure it's also based on dates from test_start
+    nifty_sliced_for_plot = nifty_df["Close"].loc[nifty_df.index >= test_start]
+    
+    # Reindex NIFTY to match the newly constructed portfolio_series index
+    nifty_series = nifty_sliced_for_plot.reindex(portfolio_series.index, method="pad")
+    
+    # Find the first non-NaN value in nifty_series for normalization
+    first_valid_nifty_value_in_test = nifty_series.dropna().iloc[0]
+    
+    # Normalize to ₹1,000,000 from the test start
+    nifty_series = (nifty_series / first_valid_nifty_value_in_test) * INITIAL_CASH
 
     plt.figure(figsize=(12, 6))
     plt.plot(portfolio_series, label="Portfolio", linewidth=2, color="green")
