@@ -313,7 +313,7 @@ def run_backtest(weights_path=WEIGHTS_PATH_DEFAULT, benchmark_symbol=BENCHMARK_S
     fetcher.add_technical_indicators()
     cerebro = bt.Cerebro()
     cerebro.broker.setcash(INITIAL_CASH)
-    cerebro.broker.setcommission(commission=0.001)
+    cerebro.broker.setcommission(commission=0.0015)
     for sym in symbols:
         if sym not in fetcher.stock_data:
             print(f"Warning: Data for {sym} not available from fetcher. Skipping.")
